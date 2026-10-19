@@ -25,10 +25,11 @@ import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { AppText as Text } from "../../components/ui/AppText";
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { ControlPill } from "../../components/ui/ControlPill";
+import * as Dialog from "../../components/ui/Dialog";
 import { NATIVE_LIQUID_GLASS_SUPPORTED } from "../../native/native-glass";
 import { BrowserPreviewButton } from "../browser/browser-preview-button";
 import { DevicePreviewButton } from "../devices/device-preview-button";
-import type { FloatingWorkingStatus } from "./floating-working-status";
+import type { FloatingWorkingNotice, FloatingWorkingStatus } from "./floating-working-status";
 import { ShimmeringWorkContent } from "./thread-work-log";
 import { useVisibleSecondClock } from "./use-visible-second-clock";
 
@@ -466,7 +467,12 @@ function FloatingStatusLabel(props: {
     );
   }
   return (
-    <WorkingDuration key="working" startedAt={props.status.startedAt} onLayout={props.onLayout} />
+    <WorkingDuration
+      key="working"
+      startedAt={props.status.startedAt}
+      notice={props.status.notice ?? null}
+      onLayout={props.onLayout}
+    />
   );
 }
 
@@ -506,16 +512,67 @@ function StatusLabelRow(props: {
 
 function WorkingDuration(props: {
   readonly startedAt: string;
+  readonly notice: FloatingWorkingNotice | null;
   readonly onLayout: (event: LayoutChangeEvent) => void;
 }) {
+  const notice = props.notice;
+  if (notice === null) {
+    return (
+      <StatusLabelRow onLayout={props.onLayout}>
+        <WorkingTimer startedAt={props.startedAt} />
+      </StatusLabelRow>
+    );
+  }
+  const progressTime =
+    notice.lastProgressAt === null ? null : formatProgressTime(notice.lastProgressAt);
+  const progressDetail =
+    notice.lastProgressAt === null
+      ? null
+      : `Last recorded progress ${formatProgressDateTime(notice.lastProgressAt)}`;
+  // The pill fits one line, so the full reason stays one tap away.
   return (
-    <StatusLabelRow onLayout={props.onLayout}>
-      <WorkingTimer startedAt={props.startedAt} />
+    <StatusLabelRow
+      accessibilityLabel={`${notice.stalled ? "Run open" : "Working"}. ${notice.label}${progressDetail ? `. ${progressDetail}` : ""}`}
+      accessibilityRole="button"
+      className="gap-2"
+      onLayout={props.onLayout}
+      onPress={() =>
+        Dialog.alert(
+          notice.stalled ? "May be stalled" : "Working",
+          progressDetail ? `${notice.label}\n\n${progressDetail}` : notice.label,
+        )
+      }
+    >
+      <WorkingTimer startedAt={props.startedAt} label={notice.stalled ? "Run open" : "Working"} />
+      <Text
+        className={`shrink font-t3-medium text-xs ${notice.stalled ? "text-warning-foreground" : "text-muted-foreground"}`}
+        numberOfLines={1}
+      >
+        {notice.stalled ? "May be stalled" : notice.label}
+        {progressTime ? ` · ${progressTime}` : ""}
+      </Text>
     </StatusLabelRow>
   );
 }
 
-export function WorkingTimer(props: { readonly startedAt: string }) {
+function formatProgressTime(iso: string): string | null {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+function formatProgressDateTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+export function WorkingTimer(props: { readonly startedAt: string; readonly label?: string }) {
   const nowMs = useVisibleSecondClock(true);
   return (
     <SystemText
@@ -523,7 +580,7 @@ export function WorkingTimer(props: { readonly startedAt: string }) {
       numberOfLines={1}
       style={{ fontVariant: ["tabular-nums"], fontWeight: "500" }}
     >
-      Working {formatWorkingDuration(props.startedAt, nowMs)}
+      {props.label ?? "Working"} {formatWorkingDuration(props.startedAt, nowMs)}
     </SystemText>
   );
 }

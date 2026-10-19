@@ -95,7 +95,9 @@ import {
   deriveReportedModelSelection,
   formatModelSelectionEffort,
   deriveRunlessWorkStartedAt,
+  deriveThreadActivityReason,
   deriveThreadActivityRun,
+  presentThreadActivityReason,
   deriveLatestThreadRun,
   deriveThreadRuntime,
   presentPendingBackgroundWork,
@@ -2530,6 +2532,12 @@ export default function ChatView(props: ChatViewProps) {
     isConnecting ||
     isCompacting ||
     runlessWorkStartedAt !== null;
+  const workingReason =
+    isWorking && serverProjection !== null
+      ? presentThreadActivityReason(
+          deriveThreadActivityReason(serverProjection, activeActivityRun?.runId ?? null),
+        )
+      : null;
   const activeContextWindow = deriveLatestContextWindowSnapshot(
     serverVisibleTurnItems ?? [],
     activeThreadLiveTokenUsage,
@@ -7970,6 +7978,7 @@ export default function ChatView(props: ChatViewProps) {
                     activeThreadShell?.hasPendingUserInput === true)
                 }
                 activeTurnStartedAt={paintOnlyDisplayedTimeline ? null : activeWorkStartedAt}
+                workingReason={paintOnlyDisplayedTimeline ? null : workingReason}
                 worktreeSetup={paintOnlyDisplayedTimeline ? null : worktreeSetup}
                 onCancelWorktreeSetup={onCancelWorktreeSetupStable}
                 {...(paintOnlyDisplayedTimeline

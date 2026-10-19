@@ -443,6 +443,68 @@ it.effect("recovers terminal subagent results until their cross-thread transfer 
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("isolates malformed terminal tasks from valid delegated completion recovery", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const sql = yield* SqlClient.SqlClient;
+    const now = yield* DateTime.now;
+    const delivery = yield* createThread("valid-completion-delivery");
+    yield* createRun(delivery, "completed", {
+      delegatedCompletion: {
+        disposition: "open",
+        nextGeneration: 2,
+        delivery: {
+          generation: 1,
+          messageId: MessageId.make("message:valid-completion-delivery"),
+          taskIds: [],
+        },
+      },
+    });
+    const malformed = yield* createThread("malformed-terminal-task");
+    const runId = yield* createRun(malformed, "completed");
+    const taskId = NodeId.make("node:malformed-terminal-task");
+    yield* projections.apply({
+      id: EventId.make("event:malformed-terminal-task"),
+      type: "subagent.updated",
+      threadId: malformed,
+      occurredAt: now,
+      payload: {
+        id: taskId,
+        threadId: malformed,
+        runId,
+        parentNodeId: NodeId.make("node:malformed-terminal-task:parent"),
+        origin: "app_owned",
+        createdBy: "agent",
+        driver,
+        providerInstanceId,
+        providerThreadId: null,
+        childThreadId: null,
+        nativeTaskRef: null,
+        prompt: "Check completion recovery.",
+        title: null,
+        model: null,
+        status: "completed",
+        result: "Complete.",
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+      },
+    });
+    assert.deepEqual(
+      new Set(yield* projections.getRecoveryThreadIds("delegated-completions")),
+      new Set([delivery, malformed]),
+    );
+
+    yield* sql`
+      UPDATE orchestration_v2_projection_subagents SET payload_json = '{broken'
+      WHERE subagent_id = ${taskId}
+    `;
+
+    assert.deepEqual(yield* projections.getRecoveryThreadIds("delegated-completions"), [delivery]);
+    assert.deepEqual(yield* projections.getUnreadableThreadIds(), [malformed]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect.each([
   { name: "SQLite", layer: layerTest },
   { name: "memory", layer: ProjectionStore.layerMemory },

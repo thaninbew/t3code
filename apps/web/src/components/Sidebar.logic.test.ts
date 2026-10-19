@@ -972,6 +972,13 @@ describe("resolveSidebarThreadStatus", () => {
         ...idle,
         runtime: { ...runtime, status: "idle" as const, lastError: "persisted" },
       }),
+    ).toBe("ready");
+    expect(
+      resolveSidebarThreadStatus({
+        ...idle,
+        runtime: { ...runtime, status: "idle" as const },
+        pendingBackgroundTasks: [{ taskId: "child", kind: "subagent" as const }],
+      }),
     ).toBe("waiting");
   });
 
@@ -1267,6 +1274,21 @@ describe("resolveThreadStatusPill", () => {
         thread: baseThread,
       }),
     ).toMatchObject({ label: "Working", pulse: true });
+  });
+
+  it("labels starting, queued, and finalizing runs by their actual state", () => {
+    for (const [status, label] of [
+      ["preparing", "Starting"],
+      ["starting", "Starting"],
+      ["queued", "Queued"],
+      ["waiting", "Finishing"],
+    ] as const) {
+      expect(
+        resolveThreadStatusPill({
+          thread: { ...baseThread, runtime: { ...baseThread.runtime, status } },
+        }),
+      ).toMatchObject({ label, pulse: true });
+    }
   });
 
   it("shows waiting for an idle thread with pending background tasks", () => {

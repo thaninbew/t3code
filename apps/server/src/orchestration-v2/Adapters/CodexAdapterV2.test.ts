@@ -7517,7 +7517,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
   const childTurnStarted = (
     turnId: string,
     afterMs?: number,
-  ): CodexReplay.CodexAppServerReplayEntry => ({
+  ): Extract<CodexReplay.CodexAppServerReplayEntry, { type: "emit_inbound" }> => ({
     type: "emit_inbound",
     label: `turn/started/${turnId}`,
     ...(afterMs === undefined ? {} : { afterMs }),
@@ -8042,6 +8042,9 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ["late-activity-completed", "completed"],
     ["stale-running", "completed"],
     ["duplicate-completed", "completed"],
+    ["observed-running-child", "completed"],
+    ["snapshot-then-resume", "running"],
+    ["snapshot-then-immediate-resume", "running"],
   ] as const)(
     "normalizes subagent %s without losing its lifecycle",
     ([nativeStatus, expectedStatus]) =>
@@ -8049,6 +8052,9 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         Effect.gen(function* () {
           const marker = yield* Deferred.make<void>();
           const firstCompletion = yield* Deferred.make<void>();
+          if (nativeStatus === "late-activity-completed") {
+            yield* TestClock.adjust("10 seconds");
+          }
           const stateEntry = (
             status: string,
             id: string,
@@ -8083,6 +8089,9 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 e.type === "emit_inbound" && e.label === "item/completed/subAgentActivity-started",
             )!,
           ];
+          if (nativeStatus === "observed-running-child") {
+            entries.push(childTurnStarted(RESUME_CHILD_TURN_1));
+          }
           if (nativeStatus === "late-activity-completed") {
             entries.push(
               resumeSubagentTranscript.entries.find(
@@ -8109,6 +8118,25 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 },
               },
             });
+          } else if (
+            nativeStatus === "snapshot-then-resume" ||
+            nativeStatus === "snapshot-then-immediate-resume"
+          ) {
+            const immediate = nativeStatus === "snapshot-then-immediate-resume";
+            const started = childTurnStarted(RESUME_CHILD_TURN_1, immediate ? 0 : 30_000);
+            entries.push(stateEntry("completed", "child-completed"), {
+              ...started,
+              frame: {
+                method: "turn/started",
+                params: {
+                  threadId: RESUME_CHILD_THREAD,
+                  turn: {
+                    ...makeCodexReplayTurn({ id: RESUME_CHILD_TURN_1, status: "inProgress" }),
+                    startedAt: immediate ? 0 : 30,
+                  },
+                },
+              },
+            });
           } else if (nativeStatus === "stale-running" || nativeStatus === "duplicate-completed") {
             entries.push(stateEntry("completed", "child-completed"), {
               ...stateEntry(
@@ -8118,20 +8146,48 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               afterMs: 100,
             });
           } else {
-            entries.push(stateEntry(nativeStatus, "status-update"));
+            entries.push(
+              stateEntry(
+                nativeStatus === "observed-running-child" ? "completed" : nativeStatus,
+                "status-update",
+              ),
+            );
           }
           if (nativeStatus === "late-activity-completed") {
-            entries.push({
-              type: "emit_inbound",
-              label: "late-marker",
-              frame: {
-                method: "turn/started",
-                params: {
-                  threadId: RESUME_CHILD_THREAD,
-                  turn: makeCodexReplayTurn({ id: RESUME_CHILD_TURN_1, status: "inProgress" }),
+            entries.push(
+              {
+                type: "emit_inbound",
+                label: "late-marker",
+                frame: {
+                  method: "turn/started",
+                  params: {
+                    threadId: RESUME_CHILD_THREAD,
+                    turn: {
+                      ...makeCodexReplayTurn({ id: RESUME_CHILD_TURN_1, status: "inProgress" }),
+                      startedAt: 0,
+                    },
+                  },
                 },
               },
-            });
+              {
+                type: "emit_inbound",
+                label: "late-terminal-marker",
+                frame: {
+                  method: "item/completed",
+                  params: {
+                    threadId: RESUME_NATIVE_THREAD,
+                    turnId: RESUME_NATIVE_TURN,
+                    item: {
+                      type: "subAgentActivity",
+                      id: "late-terminal-marker",
+                      kind: "completed",
+                      agentThreadId: RESUME_CHILD_THREAD,
+                      agentPath: "/root/resume_agent",
+                    },
+                  },
+                },
+              },
+            );
           } else {
             entries.push({
               type: "emit_inbound",
@@ -8152,17 +8208,21 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               },
             });
           }
+          let terminalSnapshotCount = 0;
           const harness = yield* makeCodexReplayHarness(
             makeCodexReplayTranscript({ scenario: `subagent-${nativeStatus}`, entries }),
-            (event) =>
-              (event.type === "message.updated" && event.message.text === "LIFECYCLE_MARKER") ||
-              (nativeStatus === "late-activity-completed" &&
-                event.type === "provider_turn.updated" &&
-                event.providerTurn.nativeTurnRef?.nativeId === RESUME_CHILD_TURN_1)
+            (event) => {
+              if (event.type === "subagent.updated" && event.subagent.status === "completed") {
+                terminalSnapshotCount++;
+              }
+              return (event.type === "message.updated" &&
+                event.message.text === "LIFECYCLE_MARKER") ||
+                (nativeStatus === "late-activity-completed" && terminalSnapshotCount === 2)
                 ? Deferred.succeed(marker, undefined)
                 : event.type === "subagent.updated" && event.subagent.status === "completed"
                   ? Deferred.succeed(firstCompletion, undefined)
-                  : Effect.void,
+                  : Effect.void;
+            },
           );
           yield* harness.runtime.startTurn(
             makeCodexTestTurnInput({
@@ -8177,9 +8237,88 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             yield* Deferred.await(firstCompletion);
             yield* TestClock.adjust("100 millis");
           }
+          if (nativeStatus === "snapshot-then-resume") {
+            yield* Deferred.await(firstCompletion);
+            yield* TestClock.adjust("30 seconds");
+          }
           yield* Deferred.await(marker);
           const latest = harness.subagentUpdates().at(-1)!.subagent;
           assert.equal(latest.status, expectedStatus);
+          const childRoots = harness.events.filter(
+            (event) =>
+              event.type === "node.updated" &&
+              event.node.threadId === latest.childThreadId &&
+              event.node.kind === "root_turn",
+          );
+          const childProviderUpdates = harness.events.filter(
+            (event) =>
+              event.type === "provider_thread.updated" &&
+              event.providerThread.id === latest.providerThreadId,
+          );
+          if (
+            nativeStatus === "snapshot-then-resume" ||
+            nativeStatus === "snapshot-then-immediate-resume"
+          ) {
+            const latestRoot = childRoots.at(-1);
+            assert.equal(latestRoot?.type === "node.updated" && latestRoot.node.status, "running");
+            assert.isNull(latest.completedAt);
+            assert.isNull(latest.result);
+            assert.isTrue(yield* harness.hasPendingBackgroundWork);
+          } else if (nativeStatus === "observed-running-child") {
+            assert.isTrue(
+              childRoots.every(
+                (event) => event.type === "node.updated" && event.node.status === "running",
+              ),
+              "an unversioned parent snapshot must not settle an observed child turn",
+            );
+            const childProvider = childProviderUpdates.at(-1);
+            assert.equal(
+              childProvider?.type === "provider_thread.updated" &&
+                childProvider.providerThread.status,
+              "active",
+            );
+          } else if (expectedStatus !== "running" && expectedStatus !== "pending") {
+            const latestRoot = childRoots.at(-1);
+            assert.equal(
+              latestRoot?.type === "node.updated" && latestRoot.node.status,
+              expectedStatus,
+              "late native starts must not reopen a terminal synthetic root",
+            );
+            assert.isTrue(
+              childRoots.some(
+                (event) => event.type === "node.updated" && event.node.status === expectedStatus,
+              ),
+              "native task terminal status must settle the synthetic child execution root",
+            );
+          } else {
+            assert.isTrue(
+              childRoots.every(
+                (event) => event.type === "node.updated" && event.node.status === "running",
+              ),
+              "nonterminal snapshots must retain child execution",
+            );
+          }
+          if (nativeStatus !== "late-activity-completed") {
+            assert.isFalse(
+              harness.events.some(
+                (event) =>
+                  event.type === "node.updated" &&
+                  event.node.threadId === harness.threadId &&
+                  event.node.kind === "root_turn" &&
+                  event.node.status !== "running",
+              ),
+              "child snapshots must not settle the parent root",
+            );
+          }
+          if (nativeStatus === "duplicate-completed" || nativeStatus === "stale-running") {
+            assert.lengthOf(
+              childRoots.filter(
+                (event) => event.type === "node.updated" && event.node.status === "completed",
+              ),
+              1,
+              "duplicate or stale snapshots must not re-emit child terminal execution",
+            );
+          }
           if (nativeStatus === "duplicate-completed") {
             const first = harness.subagentUpdates().find((e) => e.subagent.status === "completed")!;
             assert.equal(

@@ -332,6 +332,7 @@ const presentedActivityGroupsCache = new WeakMap<
     readonly activeRunId: RunId | null;
     readonly isWorking: boolean;
     readonly activeTail: boolean;
+    readonly activityStalled: boolean;
     readonly rows: ReadonlyArray<ThreadFeedEntry>;
   }
 >();
@@ -1252,6 +1253,9 @@ export function deriveThreadFeedPresentation(
   expandedWorkGroupIds: ReadonlySet<string> = new Set(),
   activeWorkStartedAt: string | null = null,
   runlessWorkActive = false,
+  // The run is still open but its provider session is known to have stopped,
+  // so reasoning cannot advance and must not read as live thinking.
+  activityStalled = false,
 ): ThreadFeedEntry[] {
   const retainedFeed = feed.filter(
     (entry) =>
@@ -1338,11 +1342,13 @@ export function deriveThreadFeedPresentation(
         activeRunId,
         isWorking,
         isActiveTailGroup,
+        activityStalled,
       );
     }
   }
   if (
     isWorking &&
+    !activityStalled &&
     activeWorkStartedAt !== null &&
     latestRun?.turnEnded !== true &&
     !result.some(
@@ -1402,6 +1408,7 @@ function appendPresentedFeedEntry(
   activeRunId: RunId | null,
   isWorking: boolean,
   activeTail: boolean,
+  activityStalled: boolean,
 ): void {
   if (entry.type !== "activity-group") {
     result.push(entry);
@@ -1423,13 +1430,22 @@ function appendPresentedFeedEntry(
     cached.activeRunId !== activeRunId ||
     cached.isWorking !== isWorking ||
     cached.activeTail !== activeTail ||
+    cached.activityStalled !== activityStalled ||
     cached.rows.some(
       (row) => row.type === "work-toggle" && expandedWorkGroupIds.has(row.groupId) !== row.expanded,
     )
   ) {
     const rows: ThreadFeedEntry[] = [];
-    appendActivityGroupRows(rows, entry, expandedWorkGroupIds, activeRunId, isWorking, activeTail);
-    cached = { activeRunId, isWorking, activeTail, rows };
+    appendActivityGroupRows(
+      rows,
+      entry,
+      expandedWorkGroupIds,
+      activeRunId,
+      isWorking,
+      activeTail,
+      activityStalled,
+    );
+    cached = { activeRunId, isWorking, activeTail, activityStalled, rows };
     presentedActivityGroupsCache.set(entry, cached);
   }
   for (const row of cached.rows) {
@@ -1444,6 +1460,7 @@ function appendActivityGroupRows(
   activeRunId: RunId | null,
   isWorking: boolean,
   activeTail: boolean,
+  activityStalled: boolean,
 ): void {
   const groupAnchorIdByActivityId = new Map<string, string>();
   let groupAnchorId: string | null = null;
@@ -1477,6 +1494,7 @@ function appendActivityGroupRows(
       activeRunId,
       isWorking,
       activeTail && isTrailingRun,
+      activityStalled,
     );
     groupableRun = [];
   };
@@ -1508,6 +1526,7 @@ function appendToolGroupRows(
   activeRunId: RunId | null,
   isWorking: boolean,
   activeTail: boolean,
+  activityStalled: boolean,
 ): void {
   const expanded = expandedWorkGroupIds.has(groupId);
   const latestActiveActivity = activities.findLast(
@@ -1515,9 +1534,10 @@ function appendToolGroupRows(
       isWorking && activity.lifecycleStatus === "inProgress" && activity.runId === activeRunId,
   );
   const active = latestActiveActivity !== undefined;
-  const live = activeTail || active;
   const latestActivity = latestActiveActivity ?? activities.at(-1)!;
-  const shimmer = activeTail && (active || latestActivity.status === "success");
+  const thoughtIsLive = !activityStalled || latestActivity.workEntry.itemType !== "reasoning";
+  const live = (activeTail || active) && thoughtIsLive;
+  const shimmer = live && activeTail && (active || latestActivity.status === "success");
   const singleActivity = activities.length === 1 ? latestActivity : null;
   const groupSummary = summarizeToolGroup(activities.map((activity) => activity.workEntry));
   const latestThought =
@@ -1618,6 +1638,7 @@ function appendToolGroupRows(
       ...activity,
       groupedToolDetail: true,
       live:
+        live &&
         isWorking &&
         activity.id === latestActivity.id &&
         activity.lifecycleStatus === "inProgress" &&

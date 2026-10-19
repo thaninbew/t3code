@@ -7109,8 +7109,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       completionWake: command.completionWake,
       updatedAt: now,
     };
-    // When that run is not live, finalize already offered and a second offer would wake the
-    // parent twice.
     const parentRun =
       task.runId === null
         ? undefined
@@ -7118,8 +7116,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const completionPlan =
       command.completionWake === "always" &&
       isTerminalDelegatedTaskStatus(task.status) &&
-      parentRun !== undefined &&
-      hasLiveRun({ runs: [parentRun] })
+      parentRun !== undefined
         ? yield* planDelegatedCompletionDelivery({
             parentProjection,
             parentRun,
@@ -10645,6 +10642,81 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
     });
 
+  const reconcileDeferredDelegatedCompletions = (threadId: ThreadId, runId?: RunId) =>
+    Effect.gen(function* () {
+      const { subagents } = yield* projectionStore.getThreadRecords(threadId, ["subagents"]);
+      const deferred = subagents.filter(
+        (task) =>
+          task.origin === "app_owned" &&
+          task.result !== null &&
+          isTerminalDelegatedTaskStatus(task.status) &&
+          (task.completionDelivery === undefined || task.completionDelivery.state === "pending") &&
+          (runId === undefined || task.runId === runId),
+      );
+      if (deferred.length === 0) return;
+      let projection = yield* projectionStore.getThreadRecords(
+        threadId,
+        ["runs", "messages", "subagents", "providerTurns"],
+        { messageRoles: ["user"] },
+      );
+      for (const task of deferred) {
+        const parentRun = projection.runs.find((run) => run.id === task.runId);
+        if (parentRun === undefined || hasLiveRun({ runs: [parentRun] })) continue;
+        const now = yield* DateTime.now;
+        // A blocking wait may disappear after the child result was persisted.
+        // Reuse the delivery planner so observation, Stop and cohort dedup still win.
+        const plan = yield* planDelegatedCompletionDelivery({
+          parentProjection: projection,
+          parentRun,
+          task,
+          updatedTask: task,
+          now,
+        });
+        yield* writeSystemEvents([
+          {
+            type: "subagent.updated",
+            threadId,
+            runId: parentRun.id,
+            nodeId: task.id,
+            driver: task.driver,
+            providerInstanceId: task.providerInstanceId,
+            occurredAt: now,
+            payload: { ...plan.task, updatedAt: now },
+          },
+          ...(plan.parentRun === undefined
+            ? []
+            : [
+                {
+                  type: "run.updated" as const,
+                  threadId,
+                  runId: parentRun.id,
+                  providerInstanceId: parentRun.providerInstanceId,
+                  occurredAt: now,
+                  payload: plan.parentRun,
+                },
+              ]),
+          ...(plan.message === undefined
+            ? []
+            : [
+                {
+                  type: "message.updated" as const,
+                  threadId,
+                  occurredAt: now,
+                  payload: plan.message,
+                },
+              ]),
+        ]);
+        if (plan.offer && plan.parentRun !== undefined) {
+          yield* offerDelegatedCompletionDelivery(threadId, parentRun.id);
+        }
+        projection = yield* projectionStore.getThreadRecords(
+          threadId,
+          ["runs", "messages", "subagents", "providerTurns"],
+          { messageRoles: ["user"] },
+        );
+      }
+    });
+
   const finalizeDelegatedCompletionDelivery = (threadId: ThreadId, runId: RunId) =>
     Effect.gen(function* () {
       // Ordinary turns do not own a delegated delivery. Read just their input
@@ -11424,7 +11496,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (delegatedTaskTerminalStatus(run.status) !== null) {
         yield* threadDispatch.withLock(
           threadId,
-          finalizeDelegatedCompletionDelivery(threadId, run.id),
+          Effect.gen(function* () {
+            yield* finalizeDelegatedCompletionDelivery(threadId, run.id);
+            yield* reconcileDeferredDelegatedCompletions(threadId, run.id);
+          }),
         );
         yield* threadDispatch
           .withLock(
@@ -11439,6 +11514,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               Effect.logWarning("Failed to start the next queued V2 run", { threadId, cause }),
             ),
           );
+      } else if (run.status === "waiting") {
+        yield* threadDispatch.withLock(
+          threadId,
+          reconcileDeferredDelegatedCompletions(threadId, run.id),
+        );
       }
       const parentThreadId = yield* appOwnedSubagentParentThreadId(threadId);
       if (parentThreadId !== undefined) {
@@ -11473,6 +11553,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ((stored.event.payload.delegatedTaskId !== undefined &&
             (stored.event.payload.status === "queued" ||
               stored.event.payload.status === "starting")) ||
+            stored.event.payload.status === "waiting" ||
             stored.event.payload.status === "completed" ||
             stored.event.payload.status === "interrupted" ||
             stored.event.payload.status === "failed" ||
@@ -11526,6 +11607,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               .withLock(
                 threadId,
                 Effect.gen(function* () {
+                  yield* reconcileDeferredDelegatedCompletions(threadId);
                   const projection = yield* projectionStore.getThreadRecords(threadId, ["runs"]);
                   // Only the run that consumed a cohort's current delivery
                   // message can settle it. A long-lived parent keeps every

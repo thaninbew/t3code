@@ -42,7 +42,10 @@ import { environmentThreadDetails } from "../../state/threads";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import { Link } from "@tanstack/react-router";
 import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
-import { notificationChildThreadId } from "@t3tools/client-runtime/state/thread-execution";
+import {
+  notificationChildThreadId,
+  type ThreadActivityReasonPresentation,
+} from "@t3tools/client-runtime/state/thread-execution";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 import {
   liveThoughtLine,
@@ -366,6 +369,7 @@ interface TimelineRowActivityState {
   isPreparingWorktree: boolean;
   latestRunId: RunId | null;
   backgroundWorktreeSetup: WorktreeSetupSnapshot | null;
+  workingReason: ThreadActivityReasonPresentation | null;
 }
 
 const TimelineRowCtx = createContext<TimelineRowSharedState>(null!);
@@ -451,6 +455,8 @@ interface MessagesTimelineProps {
   runlessWorkActive?: boolean;
   activeTurnInProgress: boolean;
   activeTurnStartedAt?: string | null;
+  /** Recorded reason for the active work, including a possible stall, shown on the Working row. */
+  workingReason?: ThreadActivityReasonPresentation | null;
   worktreeSetup?: WorktreeSetupSnapshot | null;
   onCancelWorktreeSetup?: () => void;
   retryableWorkspacePreparationRunIds?: ReadonlySet<RunId>;
@@ -553,6 +559,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   runlessWorkActive = false,
   activeTurnInProgress,
   activeTurnStartedAt = null,
+  workingReason = null,
   worktreeSetup = null,
   footer = null,
   onCancelWorktreeSetup,
@@ -853,6 +860,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     isWorking,
     runlessWorkActive,
     activeTurnStartedAt,
+    activityStalled: workingReason?.stalled === true,
     turnDiffSummaries,
     supportsConversationRollback,
     worktreeSetup,
@@ -1281,6 +1289,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     awaitingUser,
     isPreparingWorktree,
     latestRunId: latestRun?.runId ?? null,
+    workingReason,
   };
   const listHeaderLeadingContent =
     parentThreadLink === null ? (
@@ -3541,8 +3550,9 @@ function toolIconAcceptsTint(toolIcon: ToolActivityIcon | undefined): boolean {
 }
 
 function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "working" }> }) {
-  const { isCompacting, isPreparingWorktree, backgroundWorktreeSetup } =
+  const { isCompacting, isPreparingWorktree, backgroundWorktreeSetup, workingReason } =
     use(TimelineRowActivityCtx);
+  const { timestampFormat } = use(TimelineRowCtx);
   const shimmer = isPreparingWorktree || isCompacting;
   const label = isPreparingWorktree ? (
     "Setting up worktree…"
@@ -3550,14 +3560,15 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
     <CompactingLabel />
   ) : row.createdAt ? (
     <>
-      Working for <WorkingTimer createdAt={row.createdAt} />
+      {workingReason?.stalled ? "Run open for" : "Working for"}{" "}
+      <WorkingTimer createdAt={row.createdAt} />
     </>
   ) : (
     "Working..."
   );
   return (
     <div className="border-b border-border/60 pb-2 pt-1">
-      <div className="flex h-6 min-w-0 items-baseline gap-2 px-1 text-sm leading-relaxed text-muted-foreground tabular-nums">
+      <div className="flex min-h-6 min-w-0 flex-wrap items-baseline gap-x-2 px-1 text-sm leading-relaxed text-muted-foreground tabular-nums">
         <span
           ref={shimmer ? observeVisibleAnimation : undefined}
           className="relative shrink-0 overflow-hidden whitespace-nowrap"
@@ -3565,6 +3576,22 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
           {label}
           {shimmer ? <ActivityShimmerOverlay>{label}</ActivityShimmerOverlay> : null}
         </span>
+        {workingReason && !shimmer ? (
+          <span
+            className={cn(
+              "min-w-0 break-words",
+              workingReason.stalled && "text-warning-foreground",
+            )}
+          >
+            {workingReason.label}
+          </span>
+        ) : null}
+        {workingReason?.lastProgressAt && !shimmer ? (
+          <span className="shrink-0 text-xs">
+            Last recorded progress{" "}
+            {formatDayAwareTimestamp(workingReason.lastProgressAt, timestampFormat)}
+          </span>
+        ) : null}
         {backgroundWorktreeSetup ? (
           <BackgroundWorktreeSetupChip snapshot={backgroundWorktreeSetup} />
         ) : null}

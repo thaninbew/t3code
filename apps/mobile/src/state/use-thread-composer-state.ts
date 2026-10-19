@@ -8,8 +8,10 @@ import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
 import {
   deriveProviderSubagentStatus,
   deriveRunlessWorkStartedAt,
+  deriveThreadActivityReason,
   deriveThreadActivityRun,
   deriveThreadRuntime,
+  presentThreadActivityReason,
   threadRuntimeHasInterruptibleRun,
 } from "@t3tools/client-runtime/state/thread-execution";
 import { useEffect, useRef, useState } from "react";
@@ -367,6 +369,15 @@ export function useThreadComposerState() {
     );
   })();
   const runlessWorkActive = runlessWorkStartedAt !== null;
+  const activityNotice =
+    activeWorkStartedAt !== null && selectedThreadProjection
+      ? presentThreadActivityReason(
+          deriveThreadActivityReason(
+            selectedThreadProjection.projection,
+            selectedThreadActivityRun?.runId ?? null,
+          ),
+        )
+      : null;
 
   const providerSubagentStatus = selectedThreadProjection
     ? deriveProviderSubagentStatus(selectedThreadProjection.projection)
@@ -960,6 +971,7 @@ export function useThreadComposerState() {
     selectedThreadQueuedMessages,
     dispatchingQueuedMessageId,
     activeWorkStartedAt,
+    activityNotice,
     runlessWorkActive,
     providerSubagentStatus,
     isCompacting,

@@ -297,6 +297,7 @@ export interface ThreadFeedProps {
   readonly latestRun: ThreadFeedLatestRun | null;
   readonly activeWorkStartedAt: string | null;
   readonly runlessWorkActive?: boolean;
+  readonly activityStalled?: boolean;
   readonly listRef: RefObject<LegendListRef | null>;
   readonly freeze: SharedValue<boolean>;
   readonly anchorMessageId: MessageId | null;
@@ -2097,6 +2098,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       ),
       props.activeWorkStartedAt,
       props.runlessWorkActive ?? false,
+      props.activityStalled ?? false,
     ),
     props.feed,
     props.queuedMessages,

@@ -1,21 +1,92 @@
-import { threadRuntimeIsActive, type EnvironmentThreadShell } from "./models.ts";
+import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+
+import type { EnvironmentThreadShell } from "./models.ts";
 import { toSortableTimestamp } from "./threadSort.ts";
 
-type WorkingThreadInput = Pick<
+/**
+ * `finishing` is a run whose provider turn completed and is persisting as
+ * `waiting` until checkpoint capture settles it. `waiting` is a settled run
+ * held open by background work that will wake the agent.
+ */
+export type ThreadActivityStatus =
+  | "approval"
+  | "input"
+  | "starting"
+  | "queued"
+  | "working"
+  | "finishing"
+  | "waiting"
+  | "limited"
+  | "failed"
+  | "ready";
+
+type ActivityStatusInput = Pick<
   EnvironmentThreadShell,
-  | "hasActionableProposedPlan"
-  | "hasPendingApprovals"
-  | "hasPendingUserInput"
-  | "pendingSubagentRequest"
-  | "interactionMode"
-  | "latestRun"
-  | "runtime"
->;
+  "hasPendingApprovals" | "hasPendingUserInput" | "pendingSubagentRequest" | "runtime"
+> & {
+  readonly pendingBackgroundTasks?: EnvironmentThreadShell["pendingBackgroundTasks"] | undefined;
+};
+
+export function resolveThreadActivityStatus(thread: ActivityStatusInput): ThreadActivityStatus {
+  if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") {
+    return "approval";
+  }
+  if (thread.hasPendingUserInput || thread.pendingSubagentRequest === "user_input") {
+    return "input";
+  }
+  switch (thread.runtime?.status) {
+    case "preparing":
+    case "starting":
+      return "starting";
+    case "queued":
+      return "queued";
+    case "running":
+      return "working";
+    case "waiting":
+      // Live children keep the roster, which parks the shell at idle instead,
+      // so a remaining waiting run is only checkpoint finalization.
+      return "finishing";
+    case "idle":
+      // Imported and retained provider threads present idle with nothing to wake them.
+      return backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? [])
+        ? "waiting"
+        : "ready";
+    case "failed":
+      return thread.runtime.lastErrorClass === "usage_limit" ? "limited" : "failed";
+    default:
+      return "ready";
+  }
+}
+
+export function threadActivityStatusIsWorking(
+  status: ThreadActivityStatus,
+): status is "starting" | "queued" | "working" | "finishing" | "waiting" {
+  return (
+    status === "starting" ||
+    status === "queued" ||
+    status === "working" ||
+    status === "finishing" ||
+    status === "waiting"
+  );
+}
+
+const ACTIVITY_STATUS_LABELS: Partial<Record<ThreadActivityStatus, string>> = {
+  starting: "Starting",
+  queued: "Queued",
+  working: "Working",
+  finishing: "Finishing",
+  waiting: "Waiting",
+};
+
+export function threadActivityStatusLabel(status: ThreadActivityStatus): string | null {
+  return ACTIVITY_STATUS_LABELS[status] ?? null;
+}
+
+type WorkingThreadInput = ActivityStatusInput &
+  Pick<EnvironmentThreadShell, "hasActionableProposedPlan" | "interactionMode" | "latestRun">;
 
 export function isThreadWorking(thread: WorkingThreadInput): boolean {
-  if (thread.hasPendingApprovals || thread.hasPendingUserInput) return false;
-  if (thread.pendingSubagentRequest != null) return false;
-  if (!threadRuntimeIsActive(thread.runtime) && thread.runtime?.status !== "idle") return false;
+  if (!threadActivityStatusIsWorking(resolveThreadActivityStatus(thread))) return false;
   const run = thread.latestRun;
   const runSettled =
     run !== null &&

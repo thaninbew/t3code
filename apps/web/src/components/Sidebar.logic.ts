@@ -1,4 +1,8 @@
 import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
+import {
+  resolveThreadActivityStatus,
+  threadActivityStatusIsWorking,
+} from "@t3tools/client-runtime/state/thread-inbox";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import * as React from "react";
@@ -571,7 +575,9 @@ export function buildBulkUnpinContextMenuItem(input: {
 export interface ThreadStatusPill {
   label:
     | "Working"
-    | "Connecting"
+    | "Starting"
+    | "Queued"
+    | "Finishing"
     | "Completed"
     | "Failed"
     | "Pending Approval"
@@ -588,7 +594,9 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   "Awaiting Input": 4,
   Failed: 3.5,
   Working: 3,
-  Connecting: 3,
+  Starting: 3,
+  Queued: 3,
+  Finishing: 3,
   Waiting: 2.5,
   "Plan Ready": 2,
   Completed: 1,
@@ -914,31 +922,12 @@ export function shouldRecedeSidebarThread(input: {
   return false;
 }
 
-type SidebarThreadStatusInput = Pick<
-  SidebarThreadSummary,
-  "hasPendingApprovals" | "hasPendingUserInput" | "pendingSubagentRequest" | "runtime"
->;
-
-export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
-  if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") {
-    return "approval";
-  }
-  if (thread.hasPendingUserInput || thread.pendingSubagentRequest === "user_input") {
-    return "input";
-  }
-  if (
-    thread.runtime !== null &&
-    ["preparing", "queued", "starting", "running", "waiting"].includes(thread.runtime.status)
-  ) {
-    return "working";
-  }
-  if (thread.runtime?.status === "idle") {
-    return "waiting";
-  }
-  if (thread.runtime?.status === "failed") {
-    return thread.runtime.lastErrorClass === "usage_limit" ? "limited" : "failed";
-  }
-  return "ready";
+export function resolveSidebarThreadStatus(
+  thread: Parameters<typeof resolveThreadActivityStatus>[0],
+): SidebarThreadStatus {
+  const status = resolveThreadActivityStatus(thread);
+  if (status === "waiting") return "waiting";
+  return threadActivityStatusIsWorking(status) ? "working" : status;
 }
 
 export type SidebarV2TopStatusKind =
@@ -995,6 +984,8 @@ export function firstValidTimestampMs(
 export { sortActiveThreadsByOrderKey as sortThreadsForSidebar } from "@t3tools/client-runtime/state/thread-sort";
 export {
   isThreadWorking as isSidebarThreadWorking,
+  resolveThreadActivityStatus,
+  threadActivityStatusLabel,
   sortInboxThreadsByReturn,
   sortWorkingThreadsBySend,
 } from "@t3tools/client-runtime/state/thread-inbox";
@@ -1118,22 +1109,22 @@ export function resolveThreadStatusPill(input: {
     };
   }
 
-  if (thread.runtime?.status === "running" || thread.runtime?.status === "waiting") {
-    return {
-      label: "Working",
-      colorClass: "text-sky-600 dark:text-sky-300/80",
-      dotClass: "bg-sky-500 dark:bg-sky-300/80",
-      pulse: true,
-    };
-  }
-
+  const activity = resolveThreadActivityStatus(thread);
   if (
-    thread.runtime?.status === "preparing" ||
-    thread.runtime?.status === "starting" ||
-    thread.runtime?.status === "queued"
+    activity === "working" ||
+    activity === "starting" ||
+    activity === "queued" ||
+    activity === "finishing"
   ) {
     return {
-      label: "Connecting",
+      label:
+        activity === "starting"
+          ? "Starting"
+          : activity === "queued"
+            ? "Queued"
+            : activity === "finishing"
+              ? "Finishing"
+              : "Working",
       colorClass: "text-sky-600 dark:text-sky-300/80",
       dotClass: "bg-sky-500 dark:bg-sky-300/80",
       pulse: true,

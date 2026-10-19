@@ -1,7 +1,14 @@
 import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
+import type { ThreadActivityReasonPresentation } from "@t3tools/client-runtime/state/thread-execution";
+
+export type FloatingWorkingNotice = ThreadActivityReasonPresentation;
 
 export type FloatingWorkingStatus =
-  | { readonly kind: "working"; readonly startedAt: string }
+  | {
+      readonly kind: "working";
+      readonly startedAt: string;
+      readonly notice?: FloatingWorkingNotice | null;
+    }
   | { readonly kind: "syncing"; readonly label: string }
   | { readonly kind: "compacting" }
   | {

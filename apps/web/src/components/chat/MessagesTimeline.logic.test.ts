@@ -1965,6 +1965,9 @@ describe("deriveMessagesTimelineRows", () => {
       latestRun: { ...input.latestRun, turnEnded: true },
     });
     expect(ended.some((row) => row.kind === "thinking")).toBe(false);
+    const stalled = deriveMessagesTimelineRows({ ...input, activityStalled: true });
+    expect(stalled.some((row) => row.kind === "thinking")).toBe(false);
+    expect(stalled.at(-1)?.kind).toBe("working");
   });
 
   it("does not fold the active in-progress turn", () => {
@@ -2174,6 +2177,76 @@ describe("deriveMessagesTimelineRows", () => {
       entry: { id: "running-command" },
       thought: { id: "new-thought" },
     });
+  });
+
+  it("shows a stalled run's last thought as recorded while its tools stay live", () => {
+    type WorkEntry = Extract<
+      Parameters<typeof deriveMessagesTimelineRows>[0]["timelineEntries"][number],
+      { kind: "work" }
+    >;
+    const work = (
+      id: string,
+      fields: Omit<WorkEntry["entry"], "id" | "createdAt" | "runId" | "label">,
+    ): WorkEntry => ({
+      id: `${id}-entry`,
+      kind: "work",
+      createdAt: "2026-01-01T00:00:01Z",
+      entry: {
+        id,
+        createdAt: "2026-01-01T00:00:01Z",
+        runId: "turn-1" as never,
+        label: id,
+        ...fields,
+      },
+    });
+    const thought = work("thought", {
+      itemType: "reasoning",
+      detail: "Found the cause.",
+      tone: "thinking" as const,
+      toolLifecycleStatus: "inProgress" as const,
+    });
+    const input = {
+      timelineEntries: [thought],
+      latestRun: {
+        runId: "turn-1" as never,
+        status: "running" as const,
+        startedAt: "2026-01-01T00:00:00Z",
+        completedAt: null,
+      },
+      isWorking: true,
+      activeTurnStartedAt: "2026-01-01T00:00:00Z",
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    };
+    const liveRows = (rows: ReturnType<typeof deriveMessagesTimelineRows>) =>
+      rows.filter((row) => row.kind === "work-live");
+
+    expect(liveRows(deriveMessagesTimelineRows(input))).toEqual([
+      expect.objectContaining({ entry: expect.objectContaining({ id: "thought" }), active: true }),
+    ]);
+    const stalled = deriveMessagesTimelineRows({ ...input, activityStalled: true });
+    expect(liveRows(stalled)).toEqual([
+      expect.objectContaining({ entry: expect.objectContaining({ id: "thought" }), active: false }),
+    ]);
+    expect(stalled.some((row) => row.kind === "thinking")).toBe(false);
+
+    const command = work("command", {
+      command: "sleep 600",
+      requestKind: "command",
+      tone: "tool" as const,
+      toolLifecycleStatus: "inProgress" as const,
+    });
+    expect(
+      liveRows(
+        deriveMessagesTimelineRows({
+          ...input,
+          timelineEntries: [thought, command],
+          activityStalled: true,
+        }),
+      ),
+    ).toEqual([
+      expect.objectContaining({ entry: expect.objectContaining({ id: "command" }), active: true }),
+    ]);
   });
 
   it("keeps an actually running tool in the shared activity row", () => {

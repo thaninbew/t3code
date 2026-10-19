@@ -13,6 +13,8 @@ const state = vi.hoisted(() => ({
   visible: "visible",
   live: true,
   completedAt: null as string | null,
+  legacyIdle: false,
+  updatedAt: "2026-09-13T09:00:00.000Z",
   archivedAt: null as string | null,
   input: false,
   approval: false,
@@ -58,11 +60,13 @@ function mockThreadShell() {
     creationSource: "web",
     latestRunId: "run-1",
     activeRunId: null,
-    status: state.completedAt
-      ? "completed"
-      : state.sessionError || state.turnError || state.limited
-        ? "failed"
-        : "running",
+    status: state.legacyIdle
+      ? "idle"
+      : state.completedAt
+        ? "completed"
+        : state.sessionError || state.turnError || state.limited
+          ? "failed"
+          : "running",
     lastErrorClass: state.limited ? "usage_limit" : null,
     pendingRuntimeRequest: state.input
       ? { id: "request-1", kind: "user_input", createdAt: SHELL_NOW }
@@ -76,7 +80,7 @@ function mockThreadShell() {
     itemCount: 0,
     visibleItemCount: 0,
     createdAt: SHELL_NOW,
-    updatedAt: SHELL_NOW,
+    updatedAt: DateTime.makeUnsafe(state.updatedAt),
     latestRunRequestedAt: SHELL_NOW,
     latestRunStartedAt: SHELL_NOW,
     latestRunCompletedAt: state.completedAt ? DateTime.makeUnsafe(state.completedAt) : undefined,
@@ -171,6 +175,8 @@ beforeEach(() => {
     visible: "visible",
     live: true,
     completedAt: null,
+    legacyIdle: false,
+    updatedAt: "2026-09-13T09:00:00.000Z",
     archivedAt: null,
     input: false,
     approval: false,
@@ -326,6 +332,35 @@ describe("thread notifications", () => {
     state.active = { environmentId: "env-2", threadId: "thread-1" };
     await render();
     await complete();
+    expect(state.add).toHaveBeenCalledTimes(1);
+  });
+
+  it("keys legacy completions without a timestamp on the run, not updatedAt", async () => {
+    state.legacyIdle = true;
+    await render();
+    state.updatedAt = "2026-09-13T09:05:00.000Z";
+    await render();
+    expect(state.add).not.toHaveBeenCalled();
+
+    state.legacyIdle = false;
+    await render();
+    state.legacyIdle = true;
+    await render();
+    state.updatedAt = "2026-09-13T09:10:00.000Z";
+    await render();
+    state.updatedAt = "2026-09-13T09:15:00.000Z";
+    await render();
+    expect(state.add).toHaveBeenCalledTimes(1);
+    expect(state.add).toHaveBeenLastCalledWith(
+      expect.objectContaining({ title: "Thread completed" }),
+    );
+  });
+
+  it("does not replay a timed completion on metadata-only updates", async () => {
+    await render();
+    await complete();
+    state.updatedAt = "2026-09-13T10:05:00.000Z";
+    await render();
     expect(state.add).toHaveBeenCalledTimes(1);
   });
 

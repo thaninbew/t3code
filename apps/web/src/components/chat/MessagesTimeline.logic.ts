@@ -1331,6 +1331,11 @@ export function deriveMessagesTimelineRows(input: {
    */
   runlessWorkActive?: boolean;
   activeTurnStartedAt?: string | null;
+  /**
+   * The run is still open but its provider session is known to have stopped,
+   * so reasoning cannot advance and must not read as live thinking.
+   */
+  activityStalled?: boolean;
   turnDiffSummaries: ReadonlyArray<TurnDiffSummary>;
   supportsConversationRollback: boolean;
   liveAgentTaskIds?: ReadonlySet<string> | undefined;
@@ -1457,22 +1462,25 @@ export function deriveMessagesTimelineRows(input: {
   const latestThoughtEntry = visibleActiveToolEntries.findLast(
     (entry) => entry.entry.itemType === "reasoning" && (entry.entry.detail?.trim() ?? "") !== "",
   );
+  const thoughtIsLive = (entry: WorkLogEntry) =>
+    input.activityStalled !== true || entry.itemType !== "reasoning";
   const activeWorkPlacementEntryId = latestVisibleToolEntry?.id;
   const activeWorkRow =
     activeWorkAnchor && latestVisibleToolEntry && !latestToolFailed
       ? (() => {
           const groupId = workGroupId(activeWorkAnchor.id);
+          const liveEntry = (latestRunningToolEntry ?? latestVisibleToolEntry).entry;
           return {
             kind: "work-live" as const,
             id: latestToolKeepsActivityLive
               ? LIVE_ACTIVITY_ROW_ID
               : `work-live:${activeWorkAnchor.id}`,
             createdAt: activeWorkAnchor.createdAt,
-            entry: (latestRunningToolEntry ?? latestVisibleToolEntry).entry,
+            entry: liveEntry,
             groupedEntries: visibleActiveToolEntries.map((entry) => entry.entry),
             groupId,
             expanded: input.expandedWorkGroupIds?.has(groupId) ?? false,
-            active: latestToolKeepsActivityLive,
+            active: latestToolKeepsActivityLive && thoughtIsLive(liveEntry),
             ...(latestThoughtEntry ? { thought: latestThoughtEntry.entry } : {}),
           };
         })()
@@ -1643,7 +1651,7 @@ export function deriveMessagesTimelineRows(input: {
             groupedEntries: visibleGroupedEntries,
             groupId,
             expanded,
-            active: true,
+            active: thoughtIsLive(latestActiveToolEntry),
           });
           hasActivityRow = true;
           if (expanded) {
@@ -1874,6 +1882,7 @@ export function deriveMessagesTimelineRows(input: {
   }
   if (
     input.isWorking &&
+    input.activityStalled !== true &&
     input.latestRun?.turnEnded !== true &&
     !setupOwnsWorkingSlot &&
     !hasActiveCompaction &&

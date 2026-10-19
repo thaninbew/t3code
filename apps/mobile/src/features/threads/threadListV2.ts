@@ -14,8 +14,10 @@ import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-searc
 import {
   createInboxReturnTracker,
   isThreadWorking,
+  resolveThreadActivityStatus,
   sortInboxThreadsByReturn,
   sortWorkingThreadsBySend,
+  threadActivityStatusIsWorking,
 } from "@t3tools/client-runtime/state/thread-inbox";
 import {
   sortActiveThreadsByOrderKey,
@@ -152,30 +154,11 @@ export function threadHasUnseenCompletion(
 }
 
 export function resolveThreadListV2Status(
-  thread: Pick<
-    EnvironmentThreadShell,
-    "hasPendingApprovals" | "hasPendingUserInput" | "pendingSubagentRequest" | "runtime"
-  >,
+  thread: Parameters<typeof resolveThreadActivityStatus>[0],
 ): ThreadListV2Status {
-  if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") {
-    return "approval";
-  }
-  if (thread.hasPendingUserInput || thread.pendingSubagentRequest === "user_input") {
-    return "input";
-  }
-  if (
-    thread.runtime !== null &&
-    ["preparing", "queued", "starting", "running", "waiting"].includes(thread.runtime.status)
-  ) {
-    return "working";
-  }
-  if (thread.runtime?.status === "idle") {
-    return "waiting";
-  }
-  if (thread.runtime?.status === "failed") {
-    return thread.runtime.lastErrorClass === "usage_limit" ? "limited" : "failed";
-  }
-  return "ready";
+  const status = resolveThreadActivityStatus(thread);
+  if (status === "waiting") return "waiting";
+  return threadActivityStatusIsWorking(status) ? "working" : status;
 }
 
 function parseTimestampMs(isoDate: string): number {

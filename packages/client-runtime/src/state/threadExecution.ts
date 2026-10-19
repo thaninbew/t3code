@@ -16,6 +16,7 @@ import {
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ThreadProjection,
   orchestrationV2RunWorkStartedAt,
+  type RunId,
   type ThreadId,
 } from "@t3tools/contracts";
 import {
@@ -263,6 +264,155 @@ export function threadRuntimeHasInterruptibleRun(
     runtime?.activeRunId !== null &&
     runtime?.activeRunId !== undefined
   );
+}
+
+/**
+ * Why the activity run looks the way it does, from persisted projection
+ * signals only. Silence is never a signal: a long inference or tool call
+ * reports nothing until it ends. Only a stopped or errored provider session for
+ * the run's own provider thread reads as a possible stall, and only external
+ * work that outlives that session (a command, a dynamic tool, or a live child)
+ * overrides it; unfinished assistant or reasoning text cannot advance once the
+ * provider is gone. `lastProgressAt` is the newest recorded change to the run's
+ * own rows; streamed text may land between records, so present it as recorded
+ * progress rather than proof of idleness.
+ */
+export type ThreadActivityReason =
+  | { readonly kind: "approval" | "input" | "queued" | "starting" }
+  | {
+      readonly kind: "working" | "tools" | "children" | "finishing";
+      readonly lastProgressAt: string | null;
+    }
+  | {
+      readonly kind: "may_be_stalled";
+      readonly detail: string;
+      readonly lastProgressAt: string | null;
+    };
+
+type ThreadProjectionRun = OrchestrationV2ThreadProjection["runs"][number];
+
+const TERMINAL_RUN_STATUSES = new Set<ThreadProjectionRun["status"]>([
+  "completed",
+  "interrupted",
+  "failed",
+  "cancelled",
+  "rolled_back",
+]);
+
+const EXTERNAL_TOOL_ITEM_TYPES = new Set<
+  OrchestrationV2ThreadProjection["turnItems"][number]["type"]
+>(["command_execution", "dynamic_tool"]);
+
+export function deriveThreadActivityReason(
+  projection: OrchestrationV2ThreadProjection,
+  runId: RunId | null,
+): ThreadActivityReason | null {
+  const pending = projection.runtimeRequests.filter((request) => request.status === "pending");
+  if (pending.some((request) => request.kind === "user_input")) return { kind: "input" };
+  if (pending.some((request) => request.kind !== "auth_refresh")) return { kind: "approval" };
+  const run =
+    runId === null ? undefined : projection.runs.find((candidate) => candidate.id === runId);
+  if (run === undefined || TERMINAL_RUN_STATUSES.has(run.status)) return null;
+  if (run.status === "queued") return { kind: "queued" };
+  if (run.status === "preparing" || run.status === "starting") return { kind: "starting" };
+
+  const attempts = projection.attempts.filter((attempt) => attempt.runId === run.id);
+  const attemptIds = new Set(attempts.map((attempt) => attempt.id));
+  const turns = projection.providerTurns.filter(
+    (turn) => turn.runAttemptId !== null && attemptIds.has(turn.runAttemptId),
+  );
+  const items = projection.turnItems.filter((item) => item.runId === run.id);
+  const messages = projection.messages.filter((message) => message.runId === run.id);
+  const subagents = projection.subagents.filter((subagent) => subagent.runId === run.id);
+  let latestMs = Number.NEGATIVE_INFINITY;
+  const observe = (value: DateTime.Utc | null | undefined) => {
+    if (value != null) latestMs = Math.max(latestMs, DateTime.toEpochMillis(value));
+  };
+  observe(run.startedAt);
+  observe(run.workStartedAt);
+  for (const turn of turns) {
+    observe(turn.startedAt);
+    observe(turn.completedAt);
+  }
+  for (const row of [...items, ...messages, ...subagents]) observe(row.updatedAt);
+  const lastProgressAt = Number.isFinite(latestMs)
+    ? DateTime.formatIso(DateTime.makeUnsafe(latestMs))
+    : null;
+
+  if (subagents.some((subagent) => isOrchestrationV2WorkActive(subagent.status))) {
+    return { kind: "children", lastProgressAt };
+  }
+  const activeTurn = latestProviderTurnForAttempt(turns, run.activeAttemptId);
+  const turnEnded =
+    activeTurn !== undefined && activeTurn.status !== "pending" && activeTurn.status !== "running";
+  if (run.status === "waiting" || turnEnded) return { kind: "finishing", lastProgressAt };
+  if (
+    items.some(
+      (item) => EXTERNAL_TOOL_ITEM_TYPES.has(item.type) && isOrchestrationV2WorkActive(item.status),
+    )
+  ) {
+    return { kind: "tools", lastProgressAt };
+  }
+
+  const activeAttempt = attempts.find((attempt) => attempt.id === run.activeAttemptId);
+  const providerThreadId = activeAttempt?.providerThreadId ?? run.providerThreadId;
+  const providerThread = projection.providerThreads.find(
+    (candidate) => candidate.id === providerThreadId,
+  );
+  const session = projection.providerSessions.find(
+    (candidate) =>
+      candidate.id === providerThread?.providerSessionId &&
+      candidate.providerInstanceId === run.providerInstanceId,
+  );
+  if (session?.status === "stopped" || session?.status === "error") {
+    const error = session.lastError?.trim();
+    return {
+      kind: "may_be_stalled",
+      detail:
+        error !== undefined && error.length > 0
+          ? `Provider unavailable: ${error}`
+          : session.status === "error"
+            ? "Provider session errored"
+            : "Provider session stopped",
+      lastProgressAt,
+    };
+  }
+  return { kind: "working", lastProgressAt };
+}
+
+export interface ThreadActivityReasonPresentation {
+  readonly label: string;
+  readonly stalled: boolean;
+  readonly lastProgressAt: string | null;
+}
+
+const ACTIVITY_REASON_LABELS = {
+  approval: "Waiting for approval",
+  input: "Waiting for your input",
+  queued: "Queued",
+  starting: "Starting provider",
+  working: "Model is working",
+  tools: "Running a tool",
+  children: "Waiting on subagents",
+  finishing: "Finalizing turn",
+} as const;
+
+export function presentThreadActivityReason(
+  reason: ThreadActivityReason | null,
+): ThreadActivityReasonPresentation | null {
+  if (reason === null) return null;
+  if (reason.kind === "may_be_stalled") {
+    return {
+      label: `May be stalled: ${reason.detail}`,
+      stalled: true,
+      lastProgressAt: reason.lastProgressAt,
+    };
+  }
+  return {
+    label: ACTIVITY_REASON_LABELS[reason.kind],
+    stalled: false,
+    lastProgressAt: "lastProgressAt" in reason ? reason.lastProgressAt : null,
+  };
 }
 
 type BackgroundWorkKind = OrchestrationV2PendingBackgroundTask["kind"];

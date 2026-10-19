@@ -2643,6 +2643,56 @@ it("keeps the latest thought under the live tool status", () => {
   });
 });
 
+it("stops live thinking once the open run's provider is known to have stopped", () => {
+  const at = "2026-06-20T00:00:02.000Z";
+  const run = { runId, status: "running" as const, startedAt: at, completedAt: null };
+  const rows = (items: ReadonlyArray<OrchestrationV2TurnItem>, stalled: boolean) =>
+    deriveThreadFeedPresentation(
+      buildThreadFeed(items.map((item, position) => projected(item, position))),
+      run,
+      new Set(),
+      new Set(),
+      at,
+      false,
+      stalled,
+    );
+  const streaming = { ...assistantMessage(at), streaming: true, text: "Partial" };
+  expect(rows([userMessage(), streaming], false).at(-1)?.type).toBe("thinking");
+  const stalledReply = rows([userMessage(), streaming], true);
+  expect(stalledReply.some((row) => row.type === "thinking")).toBe(false);
+  expect(stalledReply.some((row) => row.id === "live-activity-row")).toBe(false);
+
+  const thought: OrchestrationV2TurnItem = {
+    ...base("stale-thought", at, 1),
+    type: "reasoning",
+    status: "running",
+    completedAt: null,
+    streaming: true,
+    text: "Checking the cause.",
+  };
+  expect(
+    rows([userMessage(), thought], false).find((row) => row.type === "work-toggle"),
+  ).toMatchObject({
+    summary: "Thinking",
+    live: true,
+    shimmer: true,
+  });
+  const stalledThought = rows([userMessage(), thought], true);
+  expect(stalledThought.find((row) => row.type === "work-toggle")).toMatchObject({
+    live: false,
+    shimmer: false,
+  });
+  expect(stalledThought.some((row) => row.type === "thinking")).toBe(false);
+
+  const tool = { ...command(at), status: "running" as const, completedAt: null };
+  const stalledTool = rows([userMessage(), thought, tool], true);
+  expect(stalledTool.find((row) => row.type === "work-toggle")).toMatchObject({
+    summary: "Running vp",
+    live: true,
+    shimmer: true,
+  });
+});
+
 it("stops stranded thinking after a steer and follows the next thought or tool", () => {
   const at = "2026-06-20T00:00:02.000Z";
   const thought = (id: string): OrchestrationV2TurnItem => ({

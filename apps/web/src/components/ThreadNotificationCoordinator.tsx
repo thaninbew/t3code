@@ -5,7 +5,13 @@ import {
 import { pendingSubagentRequestsByThread } from "@t3tools/client-runtime/state/threads";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import type { EnvironmentId, OrchestrationV2ThreadShell, ThreadId } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  OrchestrationV2ThreadShell,
+  RunId,
+  ThreadId,
+} from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import {
   CircleAlertIcon,
@@ -96,7 +102,7 @@ interface NotificationState {
   readonly raw: OrchestrationV2ThreadShell;
   readonly subagentRequest: PendingSubagentRequest | null;
   readonly attention: string | null;
-  readonly completion: number | null;
+  readonly completion: { readonly runId: RunId; readonly at: number | null } | null;
 }
 
 function EnvironmentNotifications({
@@ -141,21 +147,30 @@ function EnvironmentNotifications({
         status === "input" || status === "approval" || status === "failed" || status === "limited"
           ? `${thread.latestRun?.runId ?? ""}:${status}`
           : null;
-      const completedAt = Date.parse(thread.latestRun?.completedAt ?? "");
-      const completion =
+      // Legacy shells omit latestRunCompletedAt, and the presented completedAt then falls back
+      // to updatedAt, which advances on every metadata change. Key completion on the raw run.
+      const current =
         status === "ready" &&
-        thread.latestRun?.status === "completed" &&
-        Number.isFinite(completedAt)
-          ? completedAt
-          : (prior?.completion ?? null);
+        rawThread.latestRunId !== null &&
+        thread.latestRun?.status === "completed"
+          ? {
+              runId: rawThread.latestRunId,
+              at: rawThread.latestRunCompletedAt
+                ? DateTime.toEpochMillis(rawThread.latestRunCompletedAt)
+                : null,
+            }
+          : null;
+      const completion = current ?? prior?.completion ?? null;
       next.set(thread.id, { raw: rawThread, subagentRequest, attention, completion });
       if (!prior || thread.archivedAt !== null) continue;
+      const completedAgain =
+        current !== null &&
+        (current.runId !== prior.completion?.runId ||
+          (current.at !== null && prior.completion.at !== null
+            ? current.at > prior.completion.at
+            : prior.raw.status !== "idle" && prior.raw.status !== "completed"));
       const kind =
-        attention && attention !== prior.attention
-          ? "input"
-          : completion !== null && (prior.completion === null || completion > prior.completion)
-            ? "completion"
-            : null;
+        attention && attention !== prior.attention ? "input" : completedAgain ? "completion" : null;
       if (!kind) continue;
       const title =
         kind === "completion"

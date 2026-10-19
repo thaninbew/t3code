@@ -896,6 +896,7 @@ function ThreadRouteContent(
               ? null
               : composer.activeWorkStartedAt
           }
+          activityNotice={composer.activityNotice}
           isCompacting={composer.isCompacting}
           runlessWorkActive={composer.runlessWorkActive}
           providerSubagentStatus={composer.providerSubagentStatus}

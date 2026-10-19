@@ -2467,6 +2467,63 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             input.subagent.task = task;
             if (input.startedAt !== undefined) input.subagent.startedAt = input.startedAt;
 
+            // A parent task snapshot can be the only terminal child signal.
+            // Settle that synthetic execution, but leave observed child turns to
+            // their own lifecycle so an old snapshot cannot end newer work.
+            if (!settled && completedAt !== null && input.subagent.nativeTurnIds.size === 0) {
+              yield* emitProviderEvent({
+                type: "node.updated",
+                driver: CODEX_PROVIDER,
+                node: {
+                  id: input.subagent.childRootNodeId,
+                  threadId: input.subagent.childThreadId,
+                  runId: null,
+                  parentNodeId: null,
+                  rootNodeId: input.subagent.childRootNodeId,
+                  kind: "root_turn",
+                  status,
+                  countsForRun: false,
+                  providerThreadId: task.providerThreadId,
+                  providerTurnId: null,
+                  nativeItemRef: task.nativeTaskRef,
+                  runtimeRequestId: null,
+                  checkpointScopeId: null,
+                  startedAt: task.startedAt,
+                  completedAt,
+                },
+              });
+              yield* emitProviderEvent({
+                type: "node.updated",
+                driver: CODEX_PROVIDER,
+                node: {
+                  id: task.id,
+                  threadId: task.threadId,
+                  runId: task.runId,
+                  parentNodeId: task.parentNodeId,
+                  rootNodeId: input.subagent.parentContext.rootNodeId,
+                  kind: "subagent",
+                  status,
+                  countsForRun: false,
+                  providerThreadId: task.providerThreadId,
+                  providerTurnId: input.subagent.parentContext.providerTurnId,
+                  nativeItemRef: task.nativeTaskRef,
+                  runtimeRequestId: null,
+                  checkpointScopeId: null,
+                  startedAt: task.startedAt,
+                  completedAt,
+                },
+              });
+              yield* emitProviderEvent({
+                type: "provider_thread.updated",
+                driver: CODEX_PROVIDER,
+                providerThread: {
+                  ...input.subagent.providerThread,
+                  status: "idle",
+                  updatedAt: completedAt,
+                },
+              });
+            }
+
             yield* emitProviderEvent({
               type: "subagent.updated",
               driver: CODEX_PROVIDER,
@@ -2508,6 +2565,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         ) =>
           Effect.gen(function* () {
             if (subagent.nativeTurnIds.has(turn.nativeTurnId)) return;
+            const settledAt = subagent.task.completedAt;
+            // Codex timestamps have second precision. Only an earlier second
+            // proves this start preceded the parent's terminal snapshot.
+            if (
+              settledAt !== null &&
+              Math.floor(DateTime.toEpochMillis(turn.startedAt) / 1000) <
+                Math.floor(DateTime.toEpochMillis(settledAt) / 1000)
+            ) {
+              return;
+            }
             subagent.nativeTurnIds.add(turn.nativeTurnId);
             const parentNativeThreadId = yield* getNativeThreadId(
               subagent.parentContext.providerThread,
@@ -2592,7 +2659,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               subagent,
               status: "running",
               startedAt: turn.startedAt,
-              ...(providerTurnOrdinal > 1 ? { reopen: true, result: null } : {}),
+              ...(providerTurnOrdinal > 1 || settledAt !== null
+                ? { reopen: true, result: null }
+                : {}),
             });
             const now = yield* DateTime.now;
             yield* emitProviderEvent({

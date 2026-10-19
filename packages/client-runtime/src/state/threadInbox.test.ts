@@ -1,7 +1,12 @@
 import { EnvironmentId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { createInboxReturnTracker, sortWorkingThreadsBySend } from "./threadInbox.ts";
+import {
+  createInboxReturnTracker,
+  isThreadWorking,
+  resolveThreadActivityStatus,
+  sortWorkingThreadsBySend,
+} from "./threadInbox.ts";
 
 const environmentId = EnvironmentId.make("environment-1");
 
@@ -79,5 +84,60 @@ describe("sortWorkingThreadsBySend", () => {
     expect(
       sortWorkingThreadsBySend([launched, sentFirst, sentLast]).map((thread) => thread.id),
     ).toEqual(["sent-last", "sent-first", "launched"]);
+  });
+});
+
+describe("resolveThreadActivityStatus", () => {
+  const runtime = (status: "idle" | "queued" | "starting" | "running" | "waiting" | "failed") => ({
+    status,
+    activeRunId: null,
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    providerName: "Codex",
+    lastError: null,
+    updatedAt: "2026-06-01T00:00:00.000Z",
+  });
+  const base = { ...thread("a", false), pendingBackgroundTasks: [] };
+
+  it("keeps a retained idle provider thread ready and out of the Working shelf", () => {
+    const imported = { ...base, runtime: runtime("idle") };
+    expect(resolveThreadActivityStatus(imported)).toBe("ready");
+    expect(isThreadWorking(imported)).toBe(false);
+    expect(
+      isThreadWorking({ ...imported, pendingBackgroundTasks: [{ taskId: "c", kind: "command" }] }),
+    ).toBe(false);
+
+    const held = {
+      ...imported,
+      pendingBackgroundTasks: [{ taskId: "s", kind: "subagent" as const }],
+    };
+    expect(resolveThreadActivityStatus(held)).toBe("waiting");
+    expect(isThreadWorking(held)).toBe(true);
+  });
+
+  it("distinguishes run phases and puts owner requests first", () => {
+    expect(resolveThreadActivityStatus({ ...base, runtime: runtime("starting") })).toBe("starting");
+    expect(resolveThreadActivityStatus({ ...base, runtime: runtime("queued") })).toBe("queued");
+    expect(resolveThreadActivityStatus({ ...base, runtime: runtime("running") })).toBe("working");
+    expect(resolveThreadActivityStatus({ ...base, runtime: runtime("waiting") })).toBe("finishing");
+    expect(
+      resolveThreadActivityStatus({
+        ...base,
+        runtime: { ...runtime("failed"), lastErrorClass: "usage_limit" as const },
+      }),
+    ).toBe("limited");
+    expect(
+      resolveThreadActivityStatus({
+        ...base,
+        runtime: runtime("running"),
+        hasPendingApprovals: true,
+      }),
+    ).toBe("approval");
+    expect(
+      resolveThreadActivityStatus({
+        ...base,
+        runtime: runtime("running"),
+        pendingSubagentRequest: "user_input",
+      }),
+    ).toBe("input");
   });
 });

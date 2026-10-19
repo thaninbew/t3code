@@ -27,7 +27,9 @@ import {
   formatModelSelectionEffort,
   formatProviderSubagentStatus,
   deriveRunlessWorkStartedAt,
+  deriveThreadActivityReason,
   deriveThreadActivityRun,
+  presentThreadActivityReason,
   deriveThreadRuntime,
   threadRuntimeHasInterruptibleRun,
 } from "./threadExecution.ts";
@@ -742,5 +744,206 @@ describe("presentProviderGoal", () => {
     expect(
       presentProviderGoal({ objective: "All tests pass", status: "active" }, false).title,
     ).toBe("Goal set");
+  });
+});
+
+describe("deriveThreadActivityReason", () => {
+  const later = DateTime.makeUnsafe("2026-07-28T10:05:00.000Z");
+  const attemptId = RunAttemptId.make("attempt-live");
+  const providerThreadId = ProviderThreadId.make("provider-thread-live");
+  const sessionId = ProviderSessionId.make("session-live");
+  const liveRun = {
+    ...run("run-live", 1, "running"),
+    activeAttemptId: attemptId,
+    providerThreadId,
+  };
+  const attempt = { id: attemptId, runId: liveRun.id, providerThreadId };
+  const turn = (status: "running" | "completed") => ({
+    id: ProviderTurnId.make("turn-live"),
+    providerThreadId,
+    runAttemptId: attemptId,
+    ordinal: 1,
+    status,
+    startedAt: now,
+    completedAt: status === "running" ? null : later,
+  });
+  const session = (status: "running" | "stopped" | "error", lastError: string | null = null) => ({
+    id: sessionId,
+    providerInstanceId: liveRun.providerInstanceId,
+    status,
+    lastError,
+    updatedAt: later,
+  });
+  const projection = (overrides: Record<string, unknown> = {}) =>
+    ({
+      ...v2Projection,
+      runs: [liveRun],
+      attempts: [attempt],
+      providerTurns: [turn("running")],
+      providerThreads: [{ id: providerThreadId, providerSessionId: sessionId }],
+      providerSessions: [session("stopped")],
+      ...overrides,
+    }) as unknown as typeof v2Projection;
+  const tool = (status: "running" | "completed") => ({
+    id: TurnItemId.make("tool"),
+    runId: liveRun.id,
+    type: "command_execution",
+    status,
+    updatedAt: later,
+  });
+
+  it("flags a live run whose own provider session stopped with nothing live", () => {
+    expect(deriveThreadActivityReason(projection(), liveRun.id)).toEqual({
+      kind: "may_be_stalled",
+      detail: "Provider session stopped",
+      lastProgressAt: DateTime.formatIso(now),
+    });
+    expect(
+      deriveThreadActivityReason(
+        projection({ providerSessions: [session("error", "Codex exited")] }),
+        liveRun.id,
+      ),
+    ).toMatchObject({ kind: "may_be_stalled", detail: "Provider unavailable: Codex exited" });
+  });
+
+  it("never reads silence or unrelated sessions as a stall", () => {
+    expect(
+      deriveThreadActivityReason(
+        projection({ providerSessions: [session("running")] }),
+        liveRun.id,
+      ),
+    ).toMatchObject({ kind: "working" });
+    expect(
+      deriveThreadActivityReason(projection({ providerSessions: [] }), liveRun.id),
+    ).toMatchObject({ kind: "working" });
+    expect(
+      deriveThreadActivityReason(
+        projection({
+          providerSessions: [
+            { ...session("stopped"), providerInstanceId: ProviderInstanceId.make("other") },
+          ],
+        }),
+        liveRun.id,
+      ),
+    ).toMatchObject({ kind: "working" });
+  });
+
+  it("keeps live tools, children, requests, queue, and finalization out of stall", () => {
+    expect(
+      deriveThreadActivityReason(projection({ turnItems: [tool("running")] }), liveRun.id),
+    ).toEqual({ kind: "tools", lastProgressAt: DateTime.formatIso(later) });
+    expect(
+      deriveThreadActivityReason(
+        projection({
+          subagents: [{ runId: liveRun.id, status: "running", updatedAt: later }],
+          runs: [{ ...liveRun, status: "waiting" }],
+        }),
+        liveRun.id,
+      ),
+    ).toMatchObject({ kind: "children" });
+    expect(
+      deriveThreadActivityReason(
+        projection({ runtimeRequests: [{ status: "pending", kind: "user_input" }] }),
+        liveRun.id,
+      ),
+    ).toEqual({ kind: "input" });
+    expect(
+      deriveThreadActivityReason(
+        projection({ runtimeRequests: [{ status: "pending", kind: "command" }] }),
+        liveRun.id,
+      ),
+    ).toEqual({ kind: "approval" });
+    expect(
+      deriveThreadActivityReason(
+        projection({ runs: [{ ...liveRun, status: "queued" }] }),
+        liveRun.id,
+      ),
+    ).toEqual({ kind: "queued" });
+    expect(
+      deriveThreadActivityReason(projection({ providerTurns: [turn("completed")] }), liveRun.id),
+    ).toEqual({ kind: "finishing", lastProgressAt: DateTime.formatIso(later) });
+  });
+
+  it("leaves a terminal run ready even if a provider turn still reads live", () => {
+    const completed = { ...liveRun, status: "completed", completedAt: later };
+    expect(deriveThreadActivityReason(projection({ runs: [completed] }), liveRun.id)).toBeNull();
+  });
+
+  it("flags a stopped session even when inference text was left unfinished", () => {
+    const item = (type: "assistant_message" | "reasoning") => ({
+      ...tool("running"),
+      id: TurnItemId.make(type),
+      type,
+    });
+    for (const overrides of [
+      { turnItems: [item("assistant_message")] },
+      { turnItems: [item("reasoning")] },
+      { messages: [{ runId: liveRun.id, streaming: true, updatedAt: later }] },
+    ]) {
+      expect(deriveThreadActivityReason(projection(overrides), liveRun.id)).toEqual({
+        kind: "may_be_stalled",
+        detail: "Provider session stopped",
+        lastProgressAt: DateTime.formatIso(later),
+      });
+    }
+    expect(
+      deriveThreadActivityReason(
+        projection({
+          providerSessions: [session("running")],
+          messages: [{ runId: liveRun.id, streaming: true, updatedAt: later }],
+        }),
+        liveRun.id,
+      ),
+    ).toMatchObject({ kind: "working" });
+  });
+
+  it("keeps external command and dynamic tools legitimate after the session stops", () => {
+    for (const type of ["command_execution", "dynamic_tool"]) {
+      expect(
+        deriveThreadActivityReason(
+          projection({ turnItems: [{ ...tool("running"), type }] }),
+          liveRun.id,
+        ),
+      ).toMatchObject({ kind: "tools" });
+    }
+    expect(
+      deriveThreadActivityReason(projection({ turnItems: [tool("completed")] }), liveRun.id),
+    ).toMatchObject({ kind: "may_be_stalled" });
+  });
+
+  it("presents a readable reason with recorded progress", () => {
+    expect(
+      presentThreadActivityReason({ kind: "tools", lastProgressAt: DateTime.formatIso(later) }),
+    ).toEqual({
+      label: "Running a tool",
+      stalled: false,
+      lastProgressAt: DateTime.formatIso(later),
+    });
+    expect(
+      presentThreadActivityReason({
+        kind: "may_be_stalled",
+        detail: "Provider unavailable: Codex exited",
+        lastProgressAt: null,
+      }),
+    ).toEqual({
+      label: "May be stalled: Provider unavailable: Codex exited",
+      stalled: true,
+      lastProgressAt: null,
+    });
+    expect(presentThreadActivityReason({ kind: "queued" })).toMatchObject({ label: "Queued" });
+  });
+
+  it("measures progress from the run's own rows, not projection updates", () => {
+    const otherRunItem = { ...tool("completed"), runId: RunId.make("other"), updatedAt: later };
+    expect(
+      deriveThreadActivityReason(
+        projection({
+          providerSessions: [session("running")],
+          turnItems: [otherRunItem],
+          updatedAt: later,
+        }),
+        liveRun.id,
+      ),
+    ).toEqual({ kind: "working", lastProgressAt: DateTime.formatIso(now) });
   });
 });
