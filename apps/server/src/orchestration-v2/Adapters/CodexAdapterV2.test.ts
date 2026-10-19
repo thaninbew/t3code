@@ -8045,6 +8045,9 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ["observed-running-child", "completed"],
     ["snapshot-then-resume", "running"],
     ["snapshot-then-immediate-resume", "running"],
+    ["message-to-terminal-child", "completed"],
+    ["followup-awaiting-execution", "completed"],
+    ["followup-then-observed-turn", "running"],
   ] as const)(
     "normalizes subagent %s without losing its lifecycle",
     ([nativeStatus, expectedStatus]) =>
@@ -8058,6 +8061,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           const stateEntry = (
             status: string,
             id: string,
+            tool: "listAgents" | "sendMessage" | "followupTask" = "listAgents",
           ): Extract<CodexReplay.CodexAppServerReplayEntry, { type: "emit_inbound" }> => ({
             type: "emit_inbound",
             label: id,
@@ -8069,7 +8073,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 item: {
                   type: "collabAgentToolCall",
                   id,
-                  tool: "listAgents",
+                  tool,
                   status: "completed",
                   senderThreadId: RESUME_NATIVE_THREAD,
                   receiverThreadIds: [RESUME_CHILD_THREAD],
@@ -8118,6 +8122,35 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 },
               },
             });
+          } else if (
+            nativeStatus === "message-to-terminal-child" ||
+            nativeStatus === "followup-awaiting-execution" ||
+            nativeStatus === "followup-then-observed-turn"
+          ) {
+            entries.push(
+              stateEntry("completed", "child-completed"),
+              stateEntry(
+                "completed",
+                "repair-followup",
+                nativeStatus === "message-to-terminal-child" ? "sendMessage" : "followupTask",
+              ),
+            );
+            if (nativeStatus === "followup-then-observed-turn") {
+              entries.push({
+                type: "emit_inbound",
+                label: "followup-execution-started",
+                frame: {
+                  method: "turn/started",
+                  params: {
+                    threadId: RESUME_CHILD_THREAD,
+                    turn: {
+                      ...makeCodexReplayTurn({ id: RESUME_CHILD_TURN_1, status: "inProgress" }),
+                      startedAt: 0,
+                    },
+                  },
+                },
+              });
+            }
           } else if (
             nativeStatus === "snapshot-then-resume" ||
             nativeStatus === "snapshot-then-immediate-resume"
@@ -8257,7 +8290,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           );
           if (
             nativeStatus === "snapshot-then-resume" ||
-            nativeStatus === "snapshot-then-immediate-resume"
+            nativeStatus === "snapshot-then-immediate-resume" ||
+            nativeStatus === "followup-then-observed-turn"
           ) {
             const latestRoot = childRoots.at(-1);
             assert.equal(latestRoot?.type === "node.updated" && latestRoot.node.status, "running");

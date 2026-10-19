@@ -832,15 +832,20 @@ describe("deriveThreadActivityReason", () => {
     expect(
       deriveThreadActivityReason(projection({ turnItems: [tool("running")] }), liveRun.id),
     ).toEqual({ kind: "tools", lastProgressAt: DateTime.formatIso(later) });
-    expect(
-      deriveThreadActivityReason(
-        projection({
-          subagents: [{ runId: liveRun.id, status: "running", updatedAt: later }],
-          runs: [{ ...liveRun, status: "waiting" }],
-        }),
-        liveRun.id,
-      ),
-    ).toMatchObject({ kind: "children" });
+    for (const status of ["running", "waiting"]) {
+      expect(
+        deriveThreadActivityReason(
+          projection({
+            subagents: [
+              { runId: liveRun.id, status: "completed", updatedAt: later },
+              { runId: liveRun.id, status: "running", updatedAt: later },
+            ],
+            runs: [{ ...liveRun, status }],
+          }),
+          liveRun.id,
+        ),
+      ).toMatchObject({ kind: "children" });
+    }
     expect(
       deriveThreadActivityReason(
         projection({ runtimeRequests: [{ status: "pending", kind: "user_input" }] }),
